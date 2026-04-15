@@ -2,7 +2,7 @@
 
 **Application de gestion des AESH et EBEP — PIAL / PAS**
 
-> Outil conçu par et pour les coordonnateurs PIAL/PAS et les enseignants ULIS du premier degré.
+> Outil conçu pour les coordonnateurs PIAL/PAS 
 
 ## Présentation
 
@@ -22,7 +22,7 @@ GestEBEP est une application web monopage (un seul fichier HTML) pour coordonner
 ## Accès
 
 L'application est déployée sur Netlify :  
-👉 **https://gest-aesh.netlify.app**
+👉 **https://gestEBEP.netlify.app**
 
 Chaque PIAL/PAS dispose d'un code d'accès propre qui isole ses données.
 
