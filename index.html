@@ -4047,9 +4047,8 @@ function editEleve(id) {
   // mut-absences replaced by soins — no-op
   // if(el.notifMut) buildMutAbsGrid(el.mutAbsences||[]);
   // Restore ULIS mode
-  const ulisMode = el.ulisIndMode||'both';
-  const r=document.getElementById('ulis-mode-'+ulisMode); if(r) r.checked=true;
-  updateUlisIndBlock();
+  // ulisIndMode chargé dans le setTimeout pour que les checkboxes soient déjà cochées
+  const _ulisModeSave = el.ulisIndMode||'both';
   // Etab + classe + niveau
   populateSelectEtab('eleve-etab','— Sélectionner —');
   document.getElementById('eleve-etab').value=el.etabId||'';
@@ -4060,6 +4059,10 @@ function editEleve(id) {
     buildAeshCheckboxes(existingAeshData);
     document.getElementById('eleve-classe').value=el.classeId||'';
     document.getElementById('eleve-in-ulis').checked=el.inUlis||false;
+    // Restaurer ulisIndMode APRÈS que les checkboxes sont cochées
+    const _rMode = document.getElementById('ulis-mode-'+_ulisModeSave.replace('_','-'));
+    if(_rMode) _rMode.checked=true;
+    updateUlisIndBlock();
     // Restore niveau
     const etab=store.etablissements.find(e=>e.id===el.etabId);
     populateNiveauSelect(etab?.type||null, el.niveau||null);
@@ -4207,13 +4210,17 @@ function calcQuotaEleve(eleveId) {
 
   let creneaux;
   if(el.notifMut && el.classeId) {
-    // Inclure les créneaux de tous les élèves MUT de la même classe
     const camaradesIds = store.eleves
       .filter(e=>e.classeId===el.classeId && e.notifMut)
       .map(e=>e.id);
     creneaux = store.creneaux.filter(c=>(c.eleveIds||[c.eleve]).some(id=>camaradesIds.includes(id)));
   } else {
     creneaux = store.creneaux.filter(c=>(c.eleveIds||[c.eleve]).includes(eleveId));
+  }
+  // Pour un élève IND+ULIS : les heures ULIS (AESH CO) ne comptent PAS
+  // dans le quota individuel — elles sont assurées par l'AESH CO du dispositif
+  if(el.notifInd && el.inUlis) { // exclure ULIS du quota IND seulement si dans le dispositif
+    creneaux = creneaux.filter(c => c.creneauType !== 'ulis');
   }
   return creneaux.reduce((s,c)=>s+dureeEleveOnCreneau(c,eleveId),0);
 }
@@ -4620,25 +4627,27 @@ function buildPlanCols(evtsParJour, addBtnsFn, opts={}, soinOnlyFn=null) {
     // Créneaux positionnés — gestion des chevauchements (côte à côte)
     const evts = evtsParJour[j]||[];
     // Calculer les groupes de créneaux qui se chevauchent
-    const groups = []; // chaque groupe = liste d'indices d'evts qui se chevauchent
-    evts.forEach((evt, i)=>{
-      let placed = false;
-      for(const g of groups) {
-        // Ce créneau chevauche-t-il au moins un créneau du groupe ?
-        const overlaps = g.some(gi=>{
-          const other=evts[gi];
-          return timeToMin(evt.debut)<timeToMin(other.fin) && timeToMin(evt.fin)>timeToMin(other.debut);
-        });
-        if(overlaps) { g.push(i); placed=true; break; }
-      }
-      if(!placed) groups.push([i]);
-    });
+    // Si opts.noOverlap=true : chaque créneau en pleine largeur (grilles ULIS multi-personnes)
+    const groups = [];
+    if(!opts.noOverlap) {
+      evts.forEach((evt, i)=>{
+        let placed = false;
+        for(const g of groups) {
+          const overlaps = g.some(gi=>{
+            const other=evts[gi];
+            return timeToMin(evt.debut)<timeToMin(other.fin) && timeToMin(evt.fin)>timeToMin(other.debut);
+          });
+          if(overlaps) { g.push(i); placed=true; break; }
+        }
+        if(!placed) groups.push([i]);
+      });
+    }
     evts.forEach((evt, i)=>{
       const top = slotTop(evt.debut);
       const height = slotHeight(evt.debut, evt.fin);
       const showInfo = height >= SLOT_H*1.5;
       // Trouver la position dans son groupe
-      const g = groups.find(g=>g.includes(i));
+      const g = opts.noOverlap ? null : groups.find(g=>g.includes(i));
       const col = g ? g.indexOf(i) : 0;
       const total = g ? g.length : 1;
       const w = total > 1 ? `calc(${100/total}% - 4px)` : 'calc(100% - 6px)';
@@ -4984,11 +4993,16 @@ function renderPlanningEleve() {
 
   grid.innerHTML = buildPlanCols(evts, addFn, {}, soinOnlyFn);
 
-  const totalMin = creneaux.reduce((s,c)=>s+dureeEleveOnCreneau(c,eleveId),0);
+  // Pour IND+ULIS : totalMin = heures IND seules (hors créneaux ULIS)
+  const crInd = (el?.notifInd && el?.inUlis)
+    ? creneaux.filter(c=>c.creneauType!=='ulis')
+    : creneaux;
+  const totalMin = crInd.reduce((s,c)=>s+dureeEleveOnCreneau(c,eleveId),0);
   const totalH = minToHours(totalMin);
   const hEff = el?.heuresEffectives||el?.heuresInd||null;
   const pct = hEff?Math.min(150,Math.round(totalH/hEff*100)):null;
   const col = pct===null?'var(--text2)':pct>=100?'var(--green)':pct>=80?'var(--orange)':'var(--red)';
+  // Heures ULIS : comptées séparément (assurées par AESH CO, pas dans le quota IND)
   const ulisMin = creneaux.filter(c=>c.creneauType==='ulis').reduce((s,c)=>s+dureeEleveOnCreneau(c,eleveId),0);
   document.getElementById('planning-legend-eleve').innerHTML=`
     <div style="padding:8px 12px;background:var(--surface2);border-radius:var(--radius-sm);font-size:0.82rem;margin-top:8px">
@@ -5731,9 +5745,11 @@ function renderPlanningClasse() {
   JOURS.forEach((_,j)=>{ evts[j]=[]; });
   allCr.forEach(c=>{
     if(c.creneauType==='aesh_co') return;
+    // Exclure les créneaux ULIS : l'élève est au dispositif, pas en classe
+    if(c.creneauType==='ulis') return;
     const aesh = store.aesh.find(a=>a.id===c.aesh);
     const cEleveIds=(c.eleveIds||[c.eleve]).filter(id=>eleveIds.includes(id));
-    const isUlis=c.creneauType==='ulis';
+    const isUlis=false; // plus jamais true ici
     const mutIds=cEleveIds.filter(id=>{const el=store.eleves.find(e=>e.id===id);return el?.notifMut;});
     const isMutType = !isUlis && mutIds.length>=1;
     const color=isUlis?'var(--plan-ulis)':isMutType?'var(--plan-mut)':'var(--plan-ind)';
@@ -6445,7 +6461,7 @@ function saveCreneau() {
 
       // Vérifier ulisIndMode : si classe_only, l'AESH ne peut pas être sur un créneau ULIS de l'élève
       const el2 = store.eleves.find(e=>e.id===eleveId);
-      if(el2?.notifUlis && (el2?.ulisIndMode||'both')==='classe_only') {
+      if(el2?.inUlis && (el2?.ulisIndMode||'both')==='classe_only') {
         const crUlis = store.creneaux.filter(c=>c.creneauType==='ulis'&&(c.eleveIds||[c.eleve]).includes(eleveId)&&c.jour===jour);
         const overlap = crUlis.some(c=>timeToMin(c.debut)<timeToMin(fin)&&timeToMin(c.fin)>timeToMin(debut));
         if(overlap) {
@@ -6471,7 +6487,7 @@ function saveCreneau() {
 
     } else if(eleveType === 'ulis') {
       const el = store.eleves.find(e=>e.id===eleveId);
-      if(!el?.notifUlis&&!el?.inUlis) return alert('Élève non notifié ULIS');
+      if(!el?.notifUlis&&!el?.inUlis) return alert('Élève non notifié ULIS'); // notifUlis OU inUlis ok pour créer un créneau
       if(!store.ulis.some(u=>u.etabId===el.etabId)) return alert('Aucun dispositif ULIS dans cet établissement');
       obj.creneauType = 'ulis';
       obj.aesh = null;
@@ -6577,7 +6593,7 @@ function getAlerts() {
   });
 
   // 2b. Élève ULIS + AESH IND avec mode classe_only — alerte cohérence
-  store.eleves.filter(el=>el.notifInd&&(el.notifUlis||el.inUlis)&&el.ulisIndMode==='classe_only').forEach(el=>{
+  store.eleves.filter(el=>el.notifInd&&el.inUlis&&el.ulisIndMode==='classe_only').forEach(el=>{
     warnings.push({type:'warning',icon:'🎯',title:`${el.prenom} ${el.nom} – AESH IND hors dispositif ULIS`,desc:`L'élève a une notif. AESH individuelle mais l'accompagnement est limité à la classe de référence. Vérifier si l'AESH doit aussi accompagner dans le dispositif ULIS.`});
   });
 
@@ -7122,7 +7138,7 @@ function buildReqColCheckboxes(type) {
     'eleves-plans':      ['Nom','Prénom','Établissement','Classe','PPRE','PAP','PPS','PAI','Notification','H notifiées','H effectives'],
     'eleves-soins':      ['Nom','Prénom','Établissement','Classe','Types soins','Détail soins'],
     'eleves-pas':        ['Nom','Prénom','Établissement','Classe','Mesures PAS'],
-    'eleves-accomp':     ['Nom','Prénom','Établissement','Classe','Accompagnements en cours'],
+    'eleves-accomp':     ['Nom','Prénom','Établissement','Classe','Accompagnements en cours','Soins / Suivis extérieurs'],
     'eleves-croise':     ['Nom','Prénom','Établissement','Classe','Notification','Plans','Accompagnements','Soins'],
     'aesh-affectations': ['Nom','Prénom','Étab. principal','Étab. secondaires','H contrat','H planifiées','Élèves','Email pro','Tél.'],
     'aesh-charge':       ['Nom','Prénom','Établissement','H contrat','H planifiées','Charge %','Élèves','Statut'],
@@ -7891,7 +7907,10 @@ function reqElevesPas(etabFilter, typeEtabFilter=null, search, selectedCols=null
 // ── Requête Élèves / Accompagnements en cours ──
 function reqElevesAccomp(etabFilter, typeEtabFilter=null, search, selectedCols=null) {
   let eleves = store.eleves.filter(el=>{
-    if(!el.accompData || !Object.keys(el.accompData).length) return false;
+    // Inclure si accompData OU soins renseignés
+    const hasAccomp = el.accompData && Object.keys(el.accompData).length;
+    const hasSoins  = el.soins && el.soins.length;
+    if(!hasAccomp && !hasSoins) return false;
     if(etabFilter && !etabFilter.includes(el.etabId)) return false;
     if(typeEtabFilter){ const et=store.etablissements.find(e=>e.id===el.etabId); if(!et||!typeEtabFilter.includes(et.type)) return false; }
     if(search && !(el.prenom+' '+el.nom).toLowerCase().includes(search)) return false;
@@ -7899,13 +7918,15 @@ function reqElevesAccomp(etabFilter, typeEtabFilter=null, search, selectedCols=n
   });
   eleves = sortEleves(eleves);
   const ACCOMP_LABELS={rased:'RASED',cmpp:'CMPP',cmpea:'CMPEA',pco:'PCO',soins_liberaux:'Soins libéraux'};
-  const cols=['Nom','Prénom','Établissement','Classe','Accompagnements en cours','Détail'];
+  const cols=['Nom','Prénom','Établissement','Classe','Accompagnements en cours','Soins / Suivis extérieurs'];
   const rows = eleves.map(el=>{
     const etab=store.etablissements.find(e=>e.id===el.etabId)?.nom||'—';
     const classe=store.classes.find(c=>c.id===el.classeId)?.nom||'—';
     const accomp=Object.keys(el.accompData||{}).map(k=>ACCOMP_LABELS[k]||k).join(', ')||'—';
-    const detail=Object.entries(el.accompData||{}).filter(([,v])=>v).map(([k,v])=>`${ACCOMP_LABELS[k]||k}: ${v}`).join(' | ')||'—';
-    return [el.nom,el.prenom,etab,classe,accomp,detail];
+    // Soins : type + nom si renseigné
+    const soinsUniq=[...new Map((el.soins||[]).map(s=>[s.type+(s.nom?'|'+s.nom:''), s])).values()];
+    const soinsStr=soinsUniq.map(s=>s.type+(s.nom?' ('+s.nom+')':'')).join(', ')||'—';
+    return [el.nom,el.prenom,etab,classe,accomp,soinsStr];
   });
   return reqTable(cols, rows, selectedCols);
 }
@@ -8382,7 +8403,7 @@ function reqAeshAbsencesPeriode(search, selectedCols=null) {
     return `<div style="color:var(--text3);padding:20px;text-align:center">Aucune absence du ${fmt(debutStr)} au ${fmt(finStr)}</div>`;
   }
 
-  const cols = ['Établissement','Nom','Prénom','Type d\'absence','Début','Fin','Durée','Élèves concernés'];
+  const cols = ['Établissement','Nom','Prénom','Motif','Début','Fin','Durée','Élèves concernés'];
   const rows = lignes.map(l=>[l.etab, l.nom, l.prenom, l.type, l.debut, l.fin, l.duree, l.eleves]);
 
   const fmt = d => new Date(d+'T00:00:00').toLocaleDateString('fr-FR',{day:'2-digit',month:'long',year:'numeric'});
@@ -8488,7 +8509,7 @@ function renderPlanningUlis(ulisId, container) {
 
   const etab = store.etablissements.find(e=>e.id===fiche.etabId);
   const aeshAffectees = fiche.aeshAffectees||[];
-  const elevesUlis = store.eleves.filter(el=>el.etabId===fiche.etabId&&(el.inUlis||el.notifUlis));
+  const elevesUlis = store.eleves.filter(el=>el.etabId===fiche.etabId&&el.inUlis); // inUlis = dans le dispositif
   const eleveIds = elevesUlis.map(e=>e.id);
   const creneauxUlisEleves = store.creneaux.filter(c=>
     c.creneauType==='ulis'&&(c.eleveIds||[c.eleve]).some(id=>eleveIds.includes(id))
@@ -8518,74 +8539,111 @@ function renderPlanningUlis(ulisId, container) {
     html+=`</div>`;
   }
 
-  // ── Grille AESH : CO ULIS + IND dans le dispositif ─────
+  // ── Tableau AESH : une ligne par AESH (CO puis IND séparément) ──
   {
-    const evtsAesh = {};
-    JOURS.forEach((_,j)=>{ evtsAesh[j]=[]; });
-    // 1. AESH CO (plages depuis fiche dispositif)
+    // Calcul des AESH IND dans le dispositif (même filtre que le PDF)
+    const _crInd = store.creneaux.filter(c=>{
+      if(!c.aesh || c.creneauType==='aesh_co' || c.creneauType==='ulis') return false;
+      const crEleveIds=(c.eleveIds||[c.eleve]).filter(id=>eleveIds.includes(id));
+      if(!crEleveIds.length) return false;
+      return crEleveIds.some(eid=>{
+        const el=store.eleves.find(e=>e.id===eid);
+        if(!el) return false;
+        if(!(el.inUlis && (el.ulisIndMode||'both')==='both')) return false; // dans le dispositif
+        // Uniquement les créneaux pendant les plages ULIS de l'élève
+        const crUlisEl=store.creneaux.filter(cu=>cu.creneauType==='ulis'&&(cu.eleveIds||[cu.eleve]).includes(eid)&&cu.jour===c.jour);
+        if(!crUlisEl.length) return false; // si pas de plage ULIS saisie → on n'inclut pas
+        return crUlisEl.some(cu=>timeToMin(c.debut)<timeToMin(cu.fin)&&timeToMin(c.fin)>timeToMin(cu.debut));
+      });
+    });
+
+    // Construire les lignes
+    const _aeshRows = [];
     aeshAffectees.forEach(aff=>{
-      const a = store.aesh.find(x=>x.id===aff.aeshId);
-      if(!a) return;
-      mergeCreneaux(aff.creneaux||[]).forEach(c=>{
-        evtsAesh[c.jour].push({
-          debut:c.debut, fin:c.fin,
-          name:a.prenom[0]+'.'+a.nom, nameColor:'var(--yellow)',
-          color:'var(--yellow)', bg:'rgba(245,200,66,.12)',
-          click:'openUlisPlanningForAesh('+a.id+')', isConflict:false, sub:'CO ULIS'
+      const a=store.aesh.find(x=>x.id===aff.aeshId); if(!a) return;
+      _aeshRows.push({a, role:'CO', color:'var(--yellow)', bg:'rgba(245,200,66,.15)',
+        creneaux:mergeCreneaux(aff.creneaux||[]).map(c=>({...c,cid:null,label:'CO ULIS',clickFn:'openUlisPlanningForAesh('+a.id+')'}))});
+    });
+    const _indIds=[...new Set(_crInd.map(c=>c.aesh))].filter(id=>!aeshAffectees.some(a=>a.aeshId===id));
+    _indIds.forEach(id=>{
+      const a=store.aesh.find(x=>x.id===id); if(!a) return;
+      const cr=mergeCreneaux(_crInd.filter(c=>c.aesh===id)).map(c=>({...c,cid:c.id,label:'IND',clickFn:`openCreneauActions(${c.id},'aesh')`}));
+      if(cr.length) _aeshRows.push({a, role:'IND', color:'var(--plan-ind)', bg:'rgba(122,184,255,.15)', creneaux:cr});
+    });
+
+    const _joursA=JOURS.map((_,j)=>j).filter(j=>j<5);
+    const _rowSt='border-bottom:1px solid var(--border);display:flex;';
+    const _cellSt='flex:1;min-width:0;padding:3px 4px;border-right:1px solid var(--border);min-height:28px;';
+    const _hdrSt='flex:1;text-align:center;font-size:0.75rem;font-weight:700;color:var(--text2);padding:4px 2px;border-right:1px solid var(--border);text-transform:uppercase;letter-spacing:.3px;';
+    const _nameSt='width:80px;min-width:80px;padding:4px 6px;font-size:0.78rem;font-weight:700;border-right:1px solid var(--border);display:flex;flex-direction:column;justify-content:center;';
+
+    const nbAesh = _aeshRows.length;
+    html += '<div style="font-size:0.82rem;font-weight:700;color:var(--yellow);text-transform:uppercase;letter-spacing:.4px;margin-bottom:6px">Présences AESH — '+(etab?.nom||'')+' ('+nbAesh+' AESH)'+
+      ' <button class="btn btn-sm" onclick="openUlisModal('+ulisId+')" style="font-size:0.72rem;padding:2px 8px;margin-left:6px">⚙ Gérer</button></div>';
+
+    let _tblAesh='<div style="border:1px solid var(--border);border-radius:var(--radius-sm);overflow:hidden;font-size:0.8rem;margin-bottom:6px">';
+    _tblAesh+='<div style="'+_rowSt+'background:var(--surface2)"><div style="'+_nameSt+'width:80px;min-width:80px;background:var(--surface2);color:var(--text3);font-size:0.72rem">AESH</div>';
+    _joursA.forEach(j=>{_tblAesh+='<div style="'+_hdrSt+'">'+JOURS[j]+'</div>';});
+    _tblAesh+='</div>';
+    if(!_aeshRows.length) {
+      _tblAesh+='<div style="padding:12px;color:var(--text3);text-align:center;font-size:0.85rem">Aucun créneau AESH saisi pour ce dispositif</div>';
+    }
+    _aeshRows.forEach((row,ri)=>{
+      const _rowBg=ri%2===0?'var(--surface)':'var(--surface2)';
+      _tblAesh+='<div style="'+_rowSt+'background:'+_rowBg+'"><div style="'+_nameSt+'background:'+_rowBg+';color:'+row.color+'"><span style="font-weight:700">'+row.a.prenom[0]+'.'+row.a.nom+'</span><span style="font-size:0.7rem;color:var(--text3)">'+row.role+'</span></div>';
+      _joursA.forEach(j=>{
+        const crJ=row.creneaux.filter(c=>c.jour===j).sort((a,b)=>timeToMin(a.debut)-timeToMin(b.debut));
+        _tblAesh+='<div style="'+_cellSt+'">';
+        crJ.forEach(c=>{
+          _tblAesh+='<div onclick="'+c.clickFn+'" style="background:'+row.bg+';border-left:3px solid '+row.color+';border-radius:2px;padding:2px 4px;margin-bottom:2px;cursor:pointer">'+
+            '<span style="color:'+row.color+';font-weight:700;font-size:0.75rem">'+c.debut+'–'+c.fin+'</span>'+
+            '<span style="color:var(--text3);font-size:0.72rem;margin-left:3px">'+c.label+'</span></div>';
         });
+        _tblAesh+='</div>';
       });
+      _tblAesh+='</div>';
     });
-    // 2. AESH IND/MUT accompagnant des élèves du dispositif (créneaux normaux)
-    const crInd = store.creneaux.filter(c=>
-      c.aesh && c.creneauType!=='aesh_co' && c.creneauType!=='ulis' &&
-      (c.eleveIds||[c.eleve]).some(id=>eleveIds.includes(id))
-    );
-    mergeCreneaux(crInd).forEach(c=>{
-      const a = store.aesh.find(x=>x.id===c.aesh);
-      const isMut = c.creneauType==='mut' || (c.eleveIds||[c.eleve]).filter(id=>store.eleves.find(e=>e.id===id)?.notifMut).length>0;
-      const col = isMut?'var(--plan-mut)':'var(--plan-ind)';
-      const bg  = isMut?'rgba(155,124,255,.12)':'rgba(122,184,255,.12)';
-      evtsAesh[c.jour].push({
-        debut:c.debut, fin:c.fin,
-        name:a?a.prenom[0]+'.'+a.nom:'?', nameColor:col,
-        color:col, bg,
-        click:`openCreneauActions(${c.id},'aesh')`, isConflict:false,
-        sub:isMut?'MUT':'IND'
-      });
-    });
-    const nbAesh = aeshAffectees.length + [...new Set(crInd.map(c=>c.aesh))].filter(id=>!aeshAffectees.some(a=>a.aeshId===id)).length;
-    html += '<div style="font-size:0.82rem;font-weight:700;color:var(--yellow);text-transform:uppercase;letter-spacing:.4px;margin-bottom:6px">Présences AESH — '+(etab?.nom||'')+' ('+nbAesh+' AESH)</div>';
-    // addFn pour la grille AESH CO : ouvre le dispositif ULIS pour ajouter/modifier les plages
-    const addFnAeshCo = (j,h,clickOnly)=>{
-      const fn = `openUlisModal(${ulisId})`;
-      if(clickOnly) return fn;
-      return `<button onclick="event.stopPropagation();${fn}" class="plan-cell-add-btn" style="background:rgba(245,200,66,.1);border-color:rgba(245,200,66,.3);color:var(--yellow);pointer-events:auto" title="Gérer les AESH CO du dispositif">⚙</button>`;
-    };
-    html += buildPlanCols(evtsAesh, addFnAeshCo);
+    _tblAesh+='</div>';
+    html+=_tblAesh;
   }
 
-  // ── Grille élèves : tous les élèves sur la même grille ────
+  // ── Tableau élèves : une ligne par élève ──
   html += '<div style="font-size:0.82rem;font-weight:700;color:var(--yellow);text-transform:uppercase;letter-spacing:.4px;margin:14px 0 6px">Présences élèves — dispositif ULIS ('+elevesUlis.length+' élève'+(elevesUlis.length!==1?'s':'')+')</div>';
   if(elevesUlis.length) {
-    const evtsEleves = {};
-    JOURS.forEach((_,j)=>{ evtsEleves[j]=[]; });
-    elevesUlis.forEach(el=>{
+    const joursAEl = JOURS.map((_,j)=>j).filter(j=>j<5);
+    const rowStyleEl = 'border-bottom:1px solid var(--border);display:flex;';
+    const cellBaseEl = 'flex:1;min-width:0;padding:3px 4px;border-right:1px solid var(--border);min-height:32px;';
+    const headerCellEl = 'flex:1;text-align:center;font-size:0.75rem;font-weight:700;color:var(--text2);padding:4px 2px;border-right:1px solid var(--border);text-transform:uppercase;letter-spacing:.3px;';
+    const nameCellEl = 'width:80px;min-width:80px;padding:4px 6px;font-size:0.78rem;font-weight:700;border-right:1px solid var(--border);display:flex;flex-direction:column;justify-content:center;';
+
+    let tblEl = '<div style="border:1px solid var(--border);border-radius:var(--radius-sm);overflow:hidden;font-size:0.8rem">';
+    tblEl += '<div style="'+rowStyleEl+'background:var(--surface2)">';
+    tblEl += '<div style="'+nameCellEl+'width:80px;min-width:80px;background:var(--surface2);color:var(--text3);font-size:0.72rem">Élève</div>';
+    joursAEl.forEach(j=>{ tblEl += '<div style="'+headerCellEl+'">'+JOURS[j]+'</div>'; });
+    tblEl += '</div>';
+    elevesUlis.forEach((el,ri)=>{
       const crEl = creneauxUlisEleves.filter(c=>(c.eleveIds||[c.eleve]).includes(el.id));
-      mergeCreneaux(crEl).forEach(c=>{
-        evtsEleves[c.jour].push({
-          debut:c.debut, fin:c.fin,
-          name:el.prenom+' '+el.nom, nameColor:'var(--yellow)',
-          color:'var(--yellow)', bg:'rgba(245,200,66,.08)',
-          click:'openCreneauActions('+c.id+',\'eleve\')', isConflict:false, sub:''
+      const rowBg = ri%2===0?'var(--surface)':'var(--surface2)';
+      tblEl += '<div style="'+rowStyleEl+'background:'+rowBg+'">';
+      tblEl += '<div style="'+nameCellEl+'background:'+rowBg+';color:var(--yellow)">'+
+        '<span style="font-weight:700">'+el.prenom+'</span>'+
+        '<span style="font-size:0.7rem;color:var(--text3)">'+el.nom+'</span></div>';
+      joursAEl.forEach(j=>{
+        const crJ = mergeCreneaux(crEl.filter(c=>c.jour===j)).sort((a,b)=>timeToMin(a.debut)-timeToMin(b.debut));
+        tblEl += '<div style="'+cellBaseEl+'">';
+        crJ.forEach(c=>{
+          tblEl += '<div onclick="openCreneauActions('+c.id+',\'eleve\')" style="background:rgba(245,200,66,.12);border-left:3px solid var(--yellow);border-radius:2px;padding:2px 4px;margin-bottom:2px;cursor:pointer">'+
+            '<span style="color:var(--yellow);font-weight:700;font-size:0.75rem">'+c.debut+'–'+c.fin+'</span></div>';
         });
+        // Bouton ajout discret
+        const hAdd = crJ.length ? crJ[crJ.length-1].fin : '08:00';
+        tblEl += '<div onclick="openUlisAddEleveMenu('+ulisId+','+j+',\''+hAdd+'\')" style="opacity:0.35;cursor:pointer;text-align:center;font-size:0.8rem;color:var(--yellow);line-height:1.8" onmouseenter="this.style.opacity=\'1\'" onmouseleave="this.style.opacity=\'0.35\'">+</div>';
+        tblEl += '</div>';
       });
+      tblEl += '</div>';
     });
-    const addFnUlis = (j,h,clickOnly)=>{
-      const fn = `openUlisAddEleveMenu(${ulisId},${j},'${h}')`;
-      if(clickOnly) return fn;
-      return `<button onclick="event.stopPropagation();${fn}" class="plan-cell-add-btn" style="background:rgba(245,200,66,.1);border-color:rgba(245,200,66,.3);color:var(--yellow);pointer-events:auto">+</button>`;
-    };
-    html += buildPlanCols(evtsEleves, addFnUlis);
+    tblEl += '</div>';
+    html += tblEl;
   } else {
     html += '<div style="color:var(--text3);font-size:0.85rem;padding:10px">Aucun élève ULIS dans cet établissement.</div>';
   }
@@ -9035,10 +9093,10 @@ function exportPlanningPDF(view) {
       const pialNomLoc = store.config?.pialNom ? (store.config?.structureType||'PIAL')+' '+store.config.pialNom : '';
       const dateStr = new Date().toLocaleDateString('fr-FR');
 
-      const COLORS_U={ind:'#2563a8',mut:'#6d28d9',ulis:'#92400e',soin:'#64748b'};
-      const BG_U={ind:'#e8f0fa',mut:'#ede9fe',ulis:'#fef3c7',soin:'#f8fafc'};
+      const COLORS_U={ind:'#2563a8',mut:'#6d28d9',ulis:'#1a7a5e',soin:'#64748b'};
+      const BG_U={ind:'#e8f0fa',mut:'#ede9fe',ulis:'#e6f6f1',soin:'#f8fafc'};
 
-      const elevesUlis = store.eleves.filter(el=>el.etabId===ulisFiche.etabId&&(el.inUlis||el.notifUlis));
+      const elevesUlis = store.eleves.filter(el=>el.etabId===ulisFiche.etabId&&el.inUlis);
       const aeshAff = ulisFiche.aeshAffectees||[];
       if(!aeshAff.length && !elevesUlis.length) return alert('Aucune donnée ULIS à exporter.');
 
@@ -9050,64 +9108,76 @@ function exportPlanningPDF(view) {
       ];
       const joursActifsU = JOURS.map((_,j)=>j).filter(j=>j<5||allUlisCr.some(c=>c.jour===j));
 
-      // Génère un tableau HTML multi-lignes (une ligne par personne)
-      // Réutiliser la même logique que les autres exports (planning vertical avec rowspan)
-      const HORAIRES_U=[];
-      for(let m=8*60;m<18*60;m+=30) HORAIRES_U.push(String(Math.floor(m/60)).padStart(2,'0')+':'+String(m%60).padStart(2,'0'));
-
-      const buildUlisPlanTable = (creneauxData, joursA) => {
-        // Fusionner les créneaux consécutifs de même label
-        creneauxData = [...creneauxData].sort((a,b)=>a.jour!==b.jour?a.jour-b.jour:timeToMin(a.debut)-timeToMin(b.debut));
-        const merged=[]; creneauxData.forEach(c=>{
-          const last=merged[merged.length-1];
-          if(last&&last.jour===c.jour&&last.label===c.label&&timeToMin(last.fin)===timeToMin(c.debut)){last.fin=c.fin;}
-          else merged.push({...c});
-        });
-        const skip={}; joursA.forEach(j=>{skip[j]={};});
-        let tbl=`<table class="plan-table"><thead><tr><th style="width:46px;text-align:left">Horaire</th>${joursA.map(j=>`<th>${JOURS[j]}</th>`).join('')}</tr></thead><tbody>`;
-        HORAIRES_U.forEach((h,hi)=>{
-          const hMin=timeToMin(h),hEnd=hMin+30;
-          tbl+=`<tr><td class="time-col">${h}</td>`;
-          joursA.forEach(j=>{
-            if(skip[j][hi]){return;}
-            const starts=merged.filter(c=>c.jour===j&&timeToMin(c.debut)>=hMin&&timeToMin(c.debut)<hEnd);
-            if(!starts.length){tbl+='<td></td>';return;}
-            const maxFin=Math.max(...starts.map(c=>timeToMin(c.fin)));
-            const rs=Math.max(1,Math.ceil((maxFin-hMin)/30));
-            for(let s=1;s<rs;s++){if(hi+s<HORAIRES_U.length)skip[j][hi+s]=true;}
-            const rsAttr=rs>1?` rowspan="${rs}"`:'';
-            const cellHTML=starts.map(c=>{
-              const clr=COLORS_U[c.type||'ulis']||COLORS_U.ulis;
-              const bg=BG_U[c.type||'ulis']||BG_U.ulis;
-              return `<div style="background:${bg};border-left:5px solid ${clr};border-radius:3px;padding:3px 5px"><div style="font-weight:700;font-size:10px;color:${clr}">${c.label}</div><div style="font-size:9px;color:#555">${c.debut}–${c.fin}</div></div>`;
-            }).join('');
-            tbl+=`<td${rsAttr} style="vertical-align:top;padding:2px;border:1px solid #e2e8f0">${cellHTML}</td>`;
-          });
-          tbl+='</tr>';
-        });
-        return tbl+'</tbody></table>';
+      // ── Tableau PDF = même logique que l'écran (une ligne par personne) ──
+      const joursA = joursActifsU;
+      const th = (t,w) => `<th style="background:#2e4460;color:#fff;padding:4px 6px;border:1px solid #1a2e45;font-size:10px;${w?'width:'+w+';':''}text-align:center">${t}</th>`;
+      const tdName = (t,col) => `<td style="background:#f1f5f9;border:1px solid #e2e8f0;padding:4px 6px;font-weight:700;font-size:10px;color:${col};white-space:nowrap">${t}</td>`;
+      const tdCell = (html) => `<td style="border:1px solid #e2e8f0;padding:3px 4px;vertical-align:top;min-width:60px">${html}</td>`;
+      const crTag = (debut,fin,label,type) => {
+        const clr=COLORS_U[type||'ulis']||COLORS_U.ulis;
+        const bg=BG_U[type||'ulis']||BG_U.ulis;
+        return `<div style="background:${bg};border-left:4px solid ${clr};border-radius:2px;padding:2px 4px;margin-bottom:2px"><span style="color:${clr};font-weight:700;font-size:9px">${debut}–${fin}</span><span style="color:#555;font-size:8px;margin-left:3px">${label}</span></div>`;
       };
 
-      // Données AESH CO : tous les créneaux de toutes les AESH sur la même grille
-      const crAeshData = aeshAff.flatMap(aff=>{
+      // Tableau AESH
+      let tblAesh = `<table style="border-collapse:collapse;width:100%;margin-bottom:4px"><thead><tr>${th('AESH','80px')}${joursA.map(j=>th(JOURS[j])).join('')}</tr></thead><tbody>`;
+      const aeshRowsPdf = [];
+      // AESH CO
+      aeshAff.forEach(aff=>{
         const a=store.aesh.find(x=>x.id===aff.aeshId);
-        return mergeCreneaux(aff.creneaux||[]).map(c=>({
-          jour:c.jour,debut:c.debut,fin:c.fin,
-          label:a?a.prenom[0]+'.'+a.nom:'AESH',type:'ulis'
-        }));
+        if(!a) return;
+        aeshRowsPdf.push({label:a.prenom[0]+'.'+a.nom, role:'CO', color:COLORS_U.ulis,
+          creneaux:mergeCreneaux(aff.creneaux||[]).map(c=>({...c,type:'ulis',label:'CO'}))});
       });
+      // AESH IND dans le dispositif : uniquement pendant les plages ULIS de l'élève
+      const crIndPdf = store.creneaux.filter(c=>{
+        if(!c.aesh || c.creneauType==='aesh_co' || c.creneauType==='ulis') return false;
+        return (c.eleveIds||[c.eleve]).some(eid=>{
+          const el=store.eleves.find(e=>e.id===eid);
+          if(!el || !el.inUlis || (el.ulisIndMode||'both')!=='both') return false;
+          if(!elevesUlis.some(eu=>eu.id===eid)) return false;
+          // Vérifier chevauchement avec plages ULIS saisies de l'élève
+          const crUlisEl=store.creneaux.filter(cu=>cu.creneauType==='ulis'&&(cu.eleveIds||[cu.eleve]).includes(eid)&&cu.jour===c.jour);
+          if(!crUlisEl.length) return false;
+          return crUlisEl.some(cu=>timeToMin(c.debut)<timeToMin(cu.fin)&&timeToMin(c.fin)>timeToMin(cu.debut));
+        });
+      });
+      const aeshIndPdfIds = [...new Set(crIndPdf.map(c=>c.aesh))].filter(id=>!aeshAff.some(aff=>aff.aeshId===id));
+      aeshIndPdfIds.forEach(id=>{
+        const a=store.aesh.find(x=>x.id===id);
+        if(!a) return;
+        const cr=mergeCreneaux(crIndPdf.filter(c=>c.aesh===id)).map(c=>({...c,type:'ind',label:'IND'}));
+        if(cr.length) aeshRowsPdf.push({label:a.prenom[0]+'.'+a.nom, role:'IND', color:COLORS_U.ind, creneaux:cr});
+      });
+      if(!aeshRowsPdf.length) { tblAesh += `<tr><td colspan="${1+joursA.length}" style="color:#64748b;padding:8px;text-align:center;border:1px solid #e2e8f0;font-size:10px">Aucun créneau AESH CO saisi</td></tr>`; }
+      aeshRowsPdf.forEach((row,ri)=>{
+        const bg=ri%2===0?'#fff':'#f8fafc';
+        tblAesh+=`<tr style="background:${bg}">${tdName(row.label,row.color)}`;
+        joursA.forEach(j=>{
+          const crJ=row.creneaux.filter(c=>c.jour===j).sort((a,b)=>timeToMin(a.debut)-timeToMin(b.debut));
+          tblAesh+=tdCell(crJ.map(c=>crTag(c.debut,c.fin,c.label,c.type)).join('')||'');
+        });
+        tblAesh+='</tr>';
+      });
+      tblAesh+='</tbody></table>';
 
-      // Données élèves : tous les créneaux ULIS de tous les élèves sur la même grille
-      const crElevesData = elevesUlis.flatMap(el=>{
+      // Tableau élèves
+      let tblEleves = `<table style="border-collapse:collapse;width:100%;margin-bottom:4px"><thead><tr>${th('Élève','80px')}${joursA.map(j=>th(JOURS[j])).join('')}</tr></thead><tbody>`;
+      if(!elevesUlis.length) { tblEleves+=`<tr><td colspan="${1+joursA.length}" style="color:#64748b;padding:8px;text-align:center;border:1px solid #e2e8f0;font-size:10px">Aucun élève ULIS</td></tr>`; }
+      elevesUlis.forEach((el,ri)=>{
         const crUlis=store.creneaux.filter(c=>c.creneauType==='ulis'&&(c.eleveIds||[c.eleve]).includes(el.id));
-        return mergeCreneaux(crUlis).map(c=>({
-          jour:c.jour,debut:c.debut,fin:c.fin,
-          label:el.prenom+' '+el.nom,type:'ulis'
-        }));
+        const bg=ri%2===0?'#fff':'#f8fafc';
+        tblEleves+=`<tr style="background:${bg}">${tdName(el.prenom+' '+el.nom,COLORS_U.ulis)}`;
+        joursA.forEach(j=>{
+          const crJ=mergeCreneaux(crUlis.filter(c=>c.jour===j)).sort((a,b)=>timeToMin(a.debut)-timeToMin(b.debut));
+          tblEleves+=tdCell(crJ.map(c=>crTag(c.debut,c.fin,'ULIS','ulis')).join('')||'');
+        });
+        tblEleves+='</tr>';
       });
+      tblEleves+='</tbody></table>';
 
-      const tableAesh   = crAeshData.length   ? buildUlisPlanTable(crAeshData,   joursActifsU) : '<p style="color:#64748b;padding:10px">Aucun créneau AESH CO saisi</p>';
-      const tableEleves = crElevesData.length ? buildUlisPlanTable(crElevesData, joursActifsU) : '<p style="color:#64748b;padding:10px">Aucun créneau élève ULIS saisi</p>';
+      const tableAesh = tblAesh;
+      const tableEleves = tblEleves;
 
       // Page 1 : AESH — Page 2 : élèves — via pdfPage (CSS unifié)
       const titleAesh = 'Présences AESH — ULIS ' + etabNom;
@@ -9117,11 +9187,11 @@ function exportPlanningPDF(view) {
       const w = window.open('','_blank');
       if(!w) { alert('Popup bloquée — autorisez les popups pour ce site.'); return; }
 
-      let fullDoc = pdfPage(titleAesh, subtitleUlis, pialNomLoc, tableAesh, dateStr, '#92400e');
+      let fullDoc = pdfPage(titleAesh, subtitleUlis, pialNomLoc, tableAesh, dateStr, '#2e4460');
       const pageEleves =
         '<div style="page-break-before:always"></div>' +
-        '<div class="pdf-header" style="border-bottom-color:#92400e">' +
-        '<div><h1 style="color:#92400e">' + titleEleves + '</h1>' +
+        '<div class="pdf-header" style="border-bottom-color:#2e4460">' +
+        '<div><h1 style="color:#2e4460">' + titleEleves + '</h1>' +
         (subtitleUlis ? '<div class="sub">' + subtitleUlis + '</div>' : '') +
         '</div><div class="org">' +
         (pialNomLoc ? '<strong>' + pialNomLoc + '</strong><br>' : '') +
