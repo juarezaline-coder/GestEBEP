@@ -5009,6 +5009,8 @@ function openCreneauActions(creneauId, context) {
   const isAeshCo = c.creneauType==='aesh_co';
   const eleveId = eleveIds[0]||null;
   const el = eleveId ? store.eleves.find(e=>e.id===eleveId) : null;
+  // aeshId pour les contextes ULIS (c.aesh peut être null pour ULIS depuis fiche)
+  const aeshId = c.aesh || parseInt(document.getElementById('plan-aesh-select')?.value)||0;
 
   // Titre
   const typeLabel = isUlis ? '🎯 ULIS' : isAeshCo ? '🎯 CO ULIS' :
@@ -5043,8 +5045,9 @@ function openCreneauActions(creneauId, context) {
     }
 
     if(!isUlis && aesh) {
+      // "Changer l'AESH" : ouvrir modal en mode élève avec l'eleveId fixé
       html += `<button class="btn" style="justify-content:flex-start;width:100%;margin-bottom:4px"
-        onclick="${close}editCreneau(${creneauId})">👤 Changer l'AESH</button>`;
+        onclick="${close}editCreneauPourEleve(${creneauId},${eleveId})">👤 Changer l'AESH</button>`;
     }
 
     if(el && (el.notifUlis||el.inUlis) && !isUlis) {
@@ -5078,8 +5081,14 @@ function openCreneauActions(creneauId, context) {
 
   } else if(context === 'aesh') {
     // ── Vue AESH ─────────────────────────────────────────────────────────
-    html += `<button class="btn btn-primary" style="justify-content:flex-start;width:100%;margin-bottom:4px"
-      onclick="${close}editCreneau(${creneauId})">✏️ Modifier</button>`;
+    if(isUlis || isAeshCo) {
+      // Créneau ULIS ou CO : proposer d'ouvrir la fiche ULIS pour modifier les plages
+      html += `<button class="btn btn-primary" style="justify-content:flex-start;width:100%;margin-bottom:4px;color:var(--yellow);border-color:rgba(245,200,66,.4)"
+        onclick="${close}openUlisPlanningForAesh(${c.aesh||aeshId||0})">⚙ Modifier les plages ULIS</button>`;
+    } else {
+      html += `<button class="btn btn-primary" style="justify-content:flex-start;width:100%;margin-bottom:4px"
+        onclick="${close}editCreneau(${creneauId})">✏️ Modifier</button>`;
+    }
 
     // Alerte TP si l'AESH ne travaille pas sur ce créneau
     if(c.aesh && !aeshTravailleSurCreneau(c.aesh, c.jour, c.debut, c.fin)) {
@@ -5254,6 +5263,13 @@ function saveCreneauUlisHoraires() {
 
 function editCreneau(creneauId) {
   openCreneauModal(creneauId);
+}
+
+function editCreneauPourEleve(creneauId, eleveId) {
+  // Forcer le mode élève avec l'eleveId fixé
+  _creneauMode = 'eleve';
+  _creneauEleveId = eleveId;
+  openCreneauModal(creneauId, eleveId);
 }
 
 function deleteCreneauFromPlanning(creneauId) {
@@ -6223,7 +6239,9 @@ function _initModeEleve(editId) {
   const aeshsEtab = el ? store.aesh.filter(a=>a.etab===el.etabId||(a.etabsSec||[]).includes(el.etabId)) : store.aesh;
   aeshSel.innerHTML = '<option value="">-- Choisir une AESH --</option>' +
     aeshsEtab.map(a=>{
-      const hUsed = store.creneaux.filter(c=>c.aesh===a.id).reduce((s,c)=>s+(timeToMin(c.fin)-timeToMin(c.debut))/60,0);
+      const hUsedCr = store.creneaux.filter(c=>c.aesh===a.id).reduce((s,c)=>s+(timeToMin(c.fin)-timeToMin(c.debut))/60,0);
+      const hUsedUlis = getUlisCreneauxForAesh(a.id).reduce((s,c)=>s+(timeToMin(c.fin)-timeToMin(c.debut))/60,0);
+      const hUsed = hUsedCr + hUsedUlis;
       const col = hUsed>=a.heures?'color:var(--red)':'';
       return `<option value="${a.id}" style="${col}">${a.prenom} ${a.nom} (${hUsed.toFixed(0)}h/${a.heures}h)</option>`;
     }).join('');
@@ -8537,7 +8555,13 @@ function renderPlanningUlis(ulisId, container) {
     });
     const nbAesh = aeshAffectees.length + [...new Set(crInd.map(c=>c.aesh))].filter(id=>!aeshAffectees.some(a=>a.aeshId===id)).length;
     html += '<div style="font-size:0.82rem;font-weight:700;color:var(--yellow);text-transform:uppercase;letter-spacing:.4px;margin-bottom:6px">Présences AESH — '+(etab?.nom||'')+' ('+nbAesh+' AESH)</div>';
-    html += buildPlanCols(evtsAesh, null);
+    // addFn pour la grille AESH CO : ouvre le dispositif ULIS pour ajouter/modifier les plages
+    const addFnAeshCo = (j,h,clickOnly)=>{
+      const fn = `openUlisModal(${ulisId})`;
+      if(clickOnly) return fn;
+      return `<button onclick="event.stopPropagation();${fn}" class="plan-cell-add-btn" style="background:rgba(245,200,66,.1);border-color:rgba(245,200,66,.3);color:var(--yellow);pointer-events:auto" title="Gérer les AESH CO du dispositif">⚙</button>`;
+    };
+    html += buildPlanCols(evtsAesh, addFnAeshCo);
   }
 
   // ── Grille élèves : tous les élèves sur la même grille ────
@@ -10004,50 +10028,6 @@ document.addEventListener('DOMContentLoaded', async ()=>{
       <div id="ea-absences-list" style="max-height:340px;overflow-y:auto;border:1px solid var(--border);border-radius:var(--radius-sm);margin-bottom:14px">
         <div style="padding:20px;text-align:center;color:var(--text3)">Sélectionnez un périmètre</div>
       </div>
-
-      <!-- Ajouter une absence -->
-      <div style="padding:12px 14px;background:var(--surface2);border-radius:var(--radius-sm)">
-        <div style="font-size:0.82rem;font-weight:700;color:var(--text2);margin-bottom:10px">Ajouter une absence</div>
-        <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:8px">
-          <div>
-            <label style="font-size:0.82rem;color:var(--text3);display:block;margin-bottom:3px">AESH *</label>
-            <select id="ea-new-aesh" style="width:100%;background:var(--surface);border:1px solid var(--border);border-radius:var(--radius-sm);padding:7px 10px;color:var(--text);font-family:inherit;font-size:0.88rem;outline:none">
-              <option value="">-- Choisir --</option>
-            </select>
-          </div>
-          <div>
-            <label style="font-size:0.82rem;color:var(--text3);display:block;margin-bottom:3px">Motif *</label>
-            <select id="ea-new-type" style="width:100%;background:var(--surface);border:1px solid var(--border);border-radius:var(--radius-sm);padding:7px 10px;color:var(--text);font-family:inherit;font-size:0.88rem;outline:none">
-              <option value="">-- Choisir --</option>
-            </select>
-          </div>
-          <div>
-            <label style="font-size:0.82rem;color:var(--text3);display:block;margin-bottom:3px">Du *</label>
-            <input type="date" id="ea-new-debut" style="width:100%;background:var(--surface);border:1px solid var(--border);border-radius:var(--radius-sm);padding:7px 10px;color:var(--text);font-family:inherit;font-size:0.88rem;outline:none">
-          </div>
-          <div>
-            <label style="font-size:0.82rem;color:var(--text3);display:block;margin-bottom:3px">Au</label>
-            <input type="date" id="ea-new-fin" style="width:100%;background:var(--surface);border:1px solid var(--border);border-radius:var(--radius-sm);padding:7px 10px;color:var(--text);font-family:inherit;font-size:0.88rem;outline:none">
-          </div>
-        </div>
-        <div style="margin-bottom:8px">
-          <label style="font-size:0.82rem;color:var(--text3);display:block;margin-bottom:3px">Demi-journée</label>
-          <select id="ea-new-demi" style="width:100%;background:var(--surface);border:1px solid var(--border);border-radius:var(--radius-sm);padding:7px 10px;color:var(--text);font-family:inherit;font-size:0.88rem;outline:none">
-            <option value="non">Journée entière</option>
-            <option value="matin">Matin seulement</option>
-            <option value="apres_midi">Après-midi seulement</option>
-          </select>
-        </div>
-        <button class="btn btn-primary" style="width:100%;justify-content:center" onclick="eaAddAbsence()">
-          ➕ Ajouter cette absence
-        </button>
-      </div>
-    </div>
-    <div class="modal-footer">
-      <button class="btn" onclick="closeModal('edit-absences')">Fermer</button>
-    </div>
-  </div>
-</div>
 
 <!-- Modal Édition absences AESH -->
 <div class="modal-overlay" id="modal-edit-absences">
